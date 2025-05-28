@@ -19,8 +19,8 @@ jobs:
       matrix:
         include:
           - arch: aarch64_cortex-a53
-            sdk_url_path: https://download.openwrt.org/releases/24.10.1/targets/mediatek/filogic/
-            sdk_name: openwrt-sdk-24.10.1-mediatek-filogic_
+            sdk_url_path: https://downloads.openwrt.org/releases/24.10.1/targets/mediatek/filogic/
+            sdk_name: openwrt-sdk-24.10.1-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
     env:
       SDK_URL_PATH: ${{ matrix.sdk_url_path }}
@@ -67,6 +67,8 @@ jobs:
           cd "$CACHE_DIR_SDK"
           if ! ( wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -- "$SDK_NAME" > sha256sums.small 2>/dev/null ) ; then
             echo "::error::Can not find ${SDK_NAME} file in sha256sums."
+            echo "Available files in sha256sums:"
+            wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -E "(sdk|imagebuilder)" | head -10
             exit 1
           fi
           SDK_FILE="$(cat sha256sums.small | cut -d' ' -f2 | sed 's/*//g')"
