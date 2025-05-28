@@ -20,6 +20,7 @@ jobs:
         include:
           - arch: aarch64_cortex-a53
             sdk_url_path: https://downloads.openwrt.org/releases/24.10.1/targets/mediatek/filogic/
+            # Попробуем несколько возможных вариантов имени
             sdk_name: openwrt-sdk-24.10.1-mediatek-filogic_gcc-13.3.0_musl.Linux-x86_64.tar.zst
 
     env:
@@ -46,7 +47,8 @@ jobs:
             openwrt-${{ matrix.arch }}-${{ env.PACKAGE_NAME }}-
       - name: Install Dependencies
         run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc p7zip-full
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y ccache gettext libncurses5-dev xsltproc p7zip-full zstd
       - name: Create Directories
         run: |
           CACHE_DIR_SDK="$(eval echo "$CACHE_DIR/sdk")"
@@ -65,46 +67,162 @@ jobs:
       - name: Download and Unzip SDK
         run: |
           cd "$CACHE_DIR_SDK"
-          if ! ( wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -- "$SDK_NAME" > sha256sums.small 2>/dev/null ) ; then
-            echo "::error::Can not find ${SDK_NAME} file in sha256sums."
-            echo "Available files in sha256sums:"
-            wget -q -O - "$SDK_URL_PATH/sha256sums" | grep -E "(sdk|imagebuilder)" | head -10
+          
+          # Проверяем доступность sha256sums
+          echo "=== Проверяем доступность sha256sums файла ==="
+          if ! wget -q --spider "$SDK_URL_PATH/sha256sums"; then
+            echo "::error::sha256sums file not found at $SDK_URL_PATH"
             exit 1
           fi
-          SDK_FILE="$(cat sha256sums.small | cut -d' ' -f2 | sed 's/*//g')"
-          if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
-            wget -q -O "$SDK_FILE" "$SDK_URL_PATH/$SDK_FILE"
+          
+          # Загружаем sha256sums и выводим полное содержимое для отладки
+          echo "=== Загружаем и анализируем sha256sums ==="
+          wget -q -O sha256sums.full "$SDK_URL_PATH/sha256sums"
+          echo "Полное содержимое sha256sums:"
+          cat sha256sums.full
+          echo ""
+          
+          # Ищем все SDK файлы
+          echo "=== Поиск SDK файлов ==="
+          echo "Все файлы содержащие 'sdk':"
+          grep -i "sdk" sha256sums.full || echo "Нет файлов содержащих 'sdk'"
+          echo ""
+          
+          echo "Все файлы содержащие 'imagebuilder':"
+          grep -i "imagebuilder" sha256sums.full || echo "Нет файлов содержащих 'imagebuilder'"
+          echo ""
+          
+          echo "Все .tar.zst файлы:"
+          grep "\.tar\.zst" sha256sums.full || echo "Нет .tar.zst файлов"
+          echo ""
+          
+          echo "Все файлы содержащие 'mediatek' или 'filogic':"
+          grep -E "(mediatek|filogic)" sha256sums.full || echo "Нет файлов содержащих mediatek/filogic"
+          echo ""
+          
+          # Попробуем найти точное имя SDK
+          echo "=== Поиск конкретного SDK файла ==="
+          echo "Ищем файл: $SDK_NAME"
+          
+          # Несколько вариантов поиска
+          SDK_FOUND=""
+          
+          # Вариант 1: точное совпадение
+          if grep -F "$SDK_NAME" sha256sums.full > sha256sums.small 2>/dev/null; then
+            SDK_FOUND="exact"
+            echo "✓ Найден точное совпадение"
+          # Вариант 2: поиск по паттерну SDK
+          elif grep -E "openwrt-sdk.*mediatek.*filogic.*\.tar\.zst" sha256sums.full > sha256sums.small 2>/dev/null; then
+            SDK_FOUND="pattern"
+            echo "✓ Найден по паттерну SDK"
+          # Вариант 3: любой SDK файл
+          elif grep -E "sdk.*\.tar\.zst" sha256sums.full > sha256sums.small 2>/dev/null; then
+            SDK_FOUND="any_sdk"
+            echo "✓ Найден любой SDK файл"
+          # Вариант 4: imagebuilder как альтернатива
+          elif grep -E "openwrt-imagebuilder.*mediatek.*filogic.*\.tar\.zst" sha256sums.full > sha256sums.small 2>/dev/null; then
+            SDK_FOUND="imagebuilder"
+            echo "⚠ Найден imagebuilder вместо SDK"
+          fi
+          
+          if [ -z "$SDK_FOUND" ]; then
+            echo "::error::Не удалось найти подходящий SDK файл"
+            echo "Попробуйте использовать другую версию OpenWrt или другой target"
+            exit 1
+          fi
+          
+          # Получаем имя найденного файла
+          ACTUAL_SDK_FILE="$(cat sha256sums.small | head -1 | cut -d' ' -f2 | sed 's/*//g')"
+          echo "Фактическое имя SDK файла: $ACTUAL_SDK_FILE"
+          
+          # Загружаем файл если его нет
+          if [ ! -f "$ACTUAL_SDK_FILE" ] || ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
+            echo "=== Загружаем SDK файл ==="
+            wget -q --progress=dot:giga -O "$ACTUAL_SDK_FILE" "$SDK_URL_PATH/$ACTUAL_SDK_FILE" || {
+              echo "::error::Не удалось загрузить SDK файл: $ACTUAL_SDK_FILE"
+              exit 1
+            }
+            
+            # Проверяем контрольную сумму
             if ! sha256sum -c ./sha256sums.small >/dev/null 2>&1 ; then
-              echo "::error::SDK can not be verified!"
+              echo "::error::SDK файл не прошел проверку контрольной суммы!"
               exit 1
             fi
+            echo "✓ SDK файл успешно загружен и проверен"
+          else
+            echo "✓ SDK файл уже существует и проверен"
           fi
+          
           cd -
-          file "$CACHE_DIR_SDK/$SDK_FILE"
-          7z x "$CACHE_DIR_SDK/$SDK_FILE" -so | tar -C "$SDK_HOME" -xvf - --strip=1
+          
+          # Проверяем тип файла
+          echo "=== Информация о файле ==="
+          file "$CACHE_DIR_SDK/$ACTUAL_SDK_FILE"
+          ls -lh "$CACHE_DIR_SDK/$ACTUAL_SDK_FILE"
+          
+          # Извлекаем архив
+          echo "=== Извлечение SDK архива ==="
+          if [[ "$ACTUAL_SDK_FILE" == *.tar.zst ]]; then
+            echo "Извлекаем .tar.zst архив..."
+            if ! zstd -dc "$CACHE_DIR_SDK/$ACTUAL_SDK_FILE" | tar -C "$SDK_HOME" -xf - --strip=1; then
+              echo "::error::Не удалось извлечь .tar.zst архив"
+              exit 1
+            fi
+          elif [[ "$ACTUAL_SDK_FILE" == *.tar.xz ]]; then
+            echo "Извлекаем .tar.xz архив..."
+            if ! tar -C "$SDK_HOME" -xf "$CACHE_DIR_SDK/$ACTUAL_SDK_FILE" --strip=1; then
+              echo "::error::Не удалось извлечь .tar.xz архив"
+              exit 1
+            fi
+          else
+            echo "::error::Неподдерживаемый формат архива: $ACTUAL_SDK_FILE"
+            exit 1
+          fi
+          
+          echo "✓ SDK архив успешно извлечен"
+          
+          # Настройка SDK
           cd "$SDK_HOME"
+          echo "=== Настройка SDK ==="
+          ls -la
+          
+          # Создание симлинков
           test -d "dl" && rm -rf "dl" || true
           test -d "feeds" && rm -rf "feeds" || true
           ln -s "$CACHE_DIR_DL" "dl"
           ln -s "$CACHE_DIR_FEEDS" "feeds"
-          cp feeds.conf.default feeds.conf
-          sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
-          sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
-          sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
+          
+          # Настройка feeds
+          if [ -f "feeds.conf.default" ]; then
+            cp feeds.conf.default feeds.conf
+            sed -i 's#git.openwrt.org/openwrt/openwrt#github.com/openwrt/openwrt#' feeds.conf
+            sed -i 's#git.openwrt.org/feed/packages#github.com/openwrt/packages#' feeds.conf
+            sed -i 's#git.openwrt.org/project/luci#github.com/openwrt/luci#' feeds.conf
+            sed -i 's#git.openwrt.org/feed/telephony#github.com/openwrt/telephony#' feeds.conf
+            echo "✓ feeds.conf настроен"
+          else
+            echo "⚠ feeds.conf.default не найден"
+          fi
+          
           cd -
       - name: Update and Install Packages
         run: |
           cd "$SDK_HOME"
+          echo "=== Обновление feeds ==="
           ./scripts/feeds update -a
+          echo "=== Создание симлинка для пакета ==="
           ln -s "${{ github.workspace }}" "package/$PACKAGE_NAME"
+          echo "=== Установка feeds ==="
           ./scripts/feeds install -a
           cd -
       - name: Build Packages
         run: |
           cd "$SDK_HOME"
+          echo "=== Конфигурация сборки ==="
           make defconfig
+          echo "=== Сборка пакета ==="
           make package/${PACKAGE_NAME}/status/{clean,compile} V=s
+          echo "=== Результаты сборки ==="
           find "$SDK_HOME/bin/" -type f -name "*.ipk" -exec ls -lh {} \;
           cd -
       - name: Copy Bin Files
